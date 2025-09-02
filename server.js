@@ -112,7 +112,7 @@ async function sendEmail({ subject, html, text }) {
     }
 
     console.log("Using Gmail SMTP for email delivery");
-    const transporter = nodemailer.createTransporter({
+    const transporter = nodemailer.createTransport({
       service: "gmail",
       auth: { user, pass }
     });
