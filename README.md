@@ -1,5 +1,7 @@
 # BTC Daily Mailer
 
+🪙 **Automated Bitcoin daily report service** that sends BTC price updates, network fees, and market insights to your email every morning. Built with Node.js + Express, scheduled with node-cron, deployed on Zeabur.
+
 自動化比特幣每日報告服務，每天台北時間 09:00 發送 BTC 重點資訊到指定 Gmail 信箱。
 
 ## 📋 功能特色
