@@ -1,0 +1,198 @@
+超可以！我們把「每日 BTC 重點 → 自動寄到你的 Gmail」做成一個小型 Node.js 服務，部署到 **Zeabur**，每天台北時間 09:00 自動寄信到 `sss851120tw@gmail.com`。下面直接給你**可用的程式碼**＋**Zeabur 部署步驟**＋**Gmail/寄信兩種方案**。
+
+---
+
+# 方案總覽
+
+* **平台**：Zeabur（GitHub 連動、自動建置，支援環境變數）
+* **排程**：`node-cron` 指定時區（Asia/Taipei）每日 09:00 觸發。
+* **資料來源**：
+
+  * 價格與 24h 漲跌：CoinGecko Simple Price API。
+  * 鏈上手續費：mempool.space Recommended Fees API。
+  * ETF 淨流、FOMC 日曆：以超連結附上面板與官方頁面（避免爬蟲不穩定）。
+* **寄信方式（擇一）**：
+
+  1. **Gmail SMTP + 應用程式密碼**（寄件者用你的 Gmail，最簡單）：先在 Google 帳戶啟用 2 階段驗證並產生**應用程式密碼**。
+  2. **第三方郵件服務（如 Resend/Mailgun）**：較不受 Gmail 限制，商用寄送更穩。
+
+---
+
+# 1) 專案檔案（複製即用）
+
+**package.json**
+
+```json
+{
+  "name": "btc-daily-mailer",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.13"
+  }
+}
+```
+
+**server.js**
+
+```js
+import express from "express";
+import cron from "node-cron";
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const TZ = process.env.TZ || "Asia/Taipei";
+
+// ===== 核心：彙整當日重點 =====
+async function buildReport() {
+  const [cg, fee] = await Promise.all([
+    fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true").then(r => r.json()),
+    fetch("https://mempool.space/api/v1/fees/recommended").then(r => r.json())
+  ]);
+
+  const price = cg?.bitcoin?.usd;
+  const chg = cg?.bitcoin?.usd_24h_change;
+  const dateFmt = new Intl.DateTimeFormat("zh-Hant", { timeZone: TZ, dateStyle: "medium" });
+  const dateStr = dateFmt.format(new Date());
+
+  const lines = [
+    `📊 市場總結（${dateStr}）`,
+    `• 價格：$${Number(price).toLocaleString("en-US", { maximumFractionDigits: 2 })}（24h ${(chg >= 0 ? "+" : "")}${chg?.toFixed(2)}%）`,
+    `• 手續費建議：fast ${fee?.fastestFee} / halfHour ${fee?.halfHourFee} / hour ${fee?.hourFee} sats/vB`,
+    `• ETF 淨流：請見 Farside 面板（下方連結）`,
+    `• 重要事件：下次 FOMC 會議請見官方日曆`
+  ];
+
+  const html =
+    lines.map(s => `<div>${s}</div>`).join("") +
+    `<hr>
+     <div>🔗 追蹤連結：
+       <ul>
+         <li><a href="https://farside.co.uk/btc/">Farside：美國現貨 BTC ETF 淨流面板</a></li>
+         <li><a href="https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm">Fed 官方 FOMC 日曆</a></li>
+         <li><a href="https://www.coingecko.com/en/coins/bitcoin">CoinGecko：BTC 詳情</a></li>
+         <li><a href="https://mempool.space/">mempool.space：鏈上狀態</a></li>
+       </ul>
+     </div>`;
+
+  const text = lines.join("\n");
+  const subject = `BTC 每日重點 – ${dateStr}`;
+  return { subject, html, text };
+}
+
+// ===== 寄信（兩種模式：Gmail 或 Resend）=====
+async function sendEmail({ subject, html, text }) {
+  const to = process.env.MAIL_TO;
+  if (!to) throw new Error("請設定環境變數 MAIL_TO 收件人");
+
+  if (process.env.MAIL_PROVIDER === "resend") {
+    const RESEND_API_KEY = process.env.RESEND_API_KEY;
+    const from = process.env.MAIL_FROM || "btc-notify@example.com";
+    if (!RESEND_API_KEY) throw new Error("請設定 RESEND_API_KEY");
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ from, to, subject, html })
+    });
+    if (!res.ok) throw new Error(`Resend 發送失敗：${res.status} ${await res.text()}`);
+  } else {
+    // 預設用 Gmail SMTP（需應用程式密碼）
+    const { default: nodemailer } = await import("nodemailer");
+    const user = process.env.GMAIL_USER;
+    const pass = process.env.GMAIL_APP_PASSWORD;
+    if (!user || !pass) throw new Error("請設定 GMAIL_USER / GMAIL_APP_PASSWORD");
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user, pass }
+    });
+    await transporter.sendMail({ from: user, to, subject, html, text });
+  }
+}
+
+// 健康檢查 & 手動觸發
+app.get("/health", (_, res) => res.send("ok"));
+app.get("/run-once", async (_, res) => {
+  const report = await buildReport();
+  await sendEmail(report);
+  res.send("sent");
+});
+
+// 每日 09:00（台北）發信
+cron.schedule("0 9 * * *", async () => {
+  try {
+    const report = await buildReport();
+    await sendEmail(report);
+    console.log("Daily mail sent");
+  } catch (e) {
+    console.error(e);
+  }
+}, { timezone: TZ });
+
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+```
+
+> 註：用到了 CoinGecko Simple Price 與 mempool.space Recommended Fees API。
+
+---
+
+# 2) 建 GitHub 並部署到 Zeabur
+
+1. **上傳到 GitHub**：建立一個 repo，把上面兩個檔案 push 上去。
+
+2. **登入 Zeabur**（用 GitHub）→ 建立專案 → **加入服務** → 選 **Git Service**，挑你的 repo。
+
+3. **（可選）指定建置/啟動指令**：
+
+   * Build：`npm ci`
+   * Start：`npm start`
+     Zeabur 會自動幫你建置並部署 Node.js 專案。
+
+4. **設定環境變數（Zeabur 介面 → 環境變數）**：
+
+   * 基本
+
+     * `TZ=Asia/Taipei`（保證排程在台北時間）
+     * `MAIL_TO=sss851120tw@gmail.com`
+     * `MAIL_PROVIDER=gmail` 或 `resend`
+   * 若用 **Gmail**：
+
+     * `GMAIL_USER=你的完整 Gmail（如 you@gmail.com）`
+     * `GMAIL_APP_PASSWORD=你的 16 位應用程式密碼`（見下一節）
+   * 若用 **Resend**：
+
+     * `RESEND_API_KEY=你的 Resend API Key`
+     * `MAIL_FROM=你驗證過的寄件人，例如 "BTC Bot <no-reply@你的網域>"`
+
+5. 重新部署後，打開 Zeabur 生成的網域，瀏覽 `https://你的域名/run-once` 做**手動測試**（會立即寄一封）。
+
+6. 成功後，就會每天 09:00（台北）自動寄出。
+
+---
+
+# 3) Gmail 應用程式密碼（如選 Gmail 寄信）
+
+* 到 **Google 帳戶 → 安全性 → 兩步驟驗證** 開啟後，進入 **應用程式密碼**，產生一組 16 碼密碼，填到 `GMAIL_APP_PASSWORD`。
+* 若日後更改 Google 帳戶密碼，**應用程式密碼會失效**，需重新產生。
+
+---
+
+# 4) 小技巧 & 常見問題
+
+* **時區**：我們同時設定了 `TZ=Asia/Taipei` **以及** 在 `node-cron` 內指定 `timezone: TZ`，可避免容器/系統時區差異造成的偏差。
+* **Zeabur PORT**：程式使用 `process.env.PORT` 監聽，符合 Zeabur 的服務期望（HTTP 存活）。
+* **API 穩定性**：CoinGecko 與 mempool.space 皆有公開文件與穩定端點；若未來要加上**ETF 淨流數字**，建議：
+
+  * 先只附 **Farside** 面板連結（最穩），或
+  * 自建中介 API/Sheet 快取 Farside 表格，避免被反爬。
+* **改成每週報**：把 cron 表達式換成 `0 9 * * 1`（每週一 09:00）。
+* **內容客製**：你想加技術面（MA、RSI）、礦工指標、ETF 最近 10 日淨流圖，我可以把程式再擴充。
+
+---
+
+要不要我直接把這個專案打包成最小可用的 GitHub Repo 結構（含 `.gitignore` 與 README）給你？你只要 fork、填入 Zeabur 的環境變數就能跑起來。
