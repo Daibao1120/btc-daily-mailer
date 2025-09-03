@@ -175,8 +175,8 @@ app.get("/", (_, res) => {
   });
 });
 
-// ===== Cron Job: Daily 09:00 Taiwan Time =====
-cron.schedule("0 9 * * *", async () => {
+// ===== Cron Job: Daily 10:30 Taiwan Time =====
+cron.schedule("30 10 * * *", async () => {
   try {
     console.log(`[${new Date().toISOString()}] Starting daily BTC report job`);
     const report = await buildReport();
@@ -193,7 +193,7 @@ cron.schedule("0 9 * * *", async () => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 BTC Daily Mailer running on port ${PORT}`);
-  console.log(`⏰ Daily emails scheduled for 09:00 ${TZ}`);
+  console.log(`⏰ Daily emails scheduled for 10:30 ${TZ}`);
   console.log(`📧 Recipient: ${process.env.MAIL_TO || 'Not configured'}`);
   console.log(`📬 Provider: ${process.env.MAIL_PROVIDER || 'gmail'}`);
 });
